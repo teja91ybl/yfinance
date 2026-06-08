@@ -4,8 +4,32 @@ import datetime
 import pytz
 import telepot
 import logging
+import time
+import socket
+import os, sys
+import psutil
 
-# Configure logging
+print("[INIT] Starting SOXX RSI Notifier...")
+
+# ============================
+# SINGLE INSTANCE PROTECTION
+# ============================
+for proc in psutil.process_iter(['pid', 'cmdline']):
+    try:
+        if proc.info['cmdline'] and 'soxx_rsi_notifier.py' in ' '.join(proc.info['cmdline']) and proc.pid != os.getpid():
+            print(f"[INIT] Another instance detected (PID {proc.pid}). Exiting.")
+            sys.exit()
+    except Exception:
+        pass
+
+# ============================
+# NETWORK TIMEOUT
+# ============================
+socket.setdefaulttimeout(5)
+
+# ============================
+# LOGGING
+# ============================
 logging.basicConfig(
     filename="/home/tejraspberrypi12/yfinance/soxx.log",
     level=logging.INFO,
@@ -21,132 +45,166 @@ SYMBOL = "SOXX"
 TZ = pytz.timezone("America/Chicago")
 
 bot = telepot.Bot(TOKEN)
-print("Bot username:", bot.getMe()["username"])
+print("[INIT] Bot username:", bot.getMe()["username"])
+
+last_update_id = 0
+
 
 # ============================
 # RSI CALCULATION (EMA-based)
 # ============================
 def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    print(f"[RSI] Computing RSI for {len(series)} candles...")
+    try:
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+        avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
 
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+        print("[RSI] RSI calculation complete.")
+        return rsi
+    except Exception as e:
+        print("[ERROR] RSI calculation failed:", e)
+        return None
+
 
 # ============================
 # TELEGRAM SEND
 # ============================
 def send_message(msg):
+    print("[TELEGRAM] Sending message...")
     try:
         bot.sendMessage(CHAT_ID, msg)
         print("✅ Message sent successfully.")
     except Exception as e:
         print("❌ Telegram send error:", e)
 
+
 # ============================
 # READ LATEST TELEGRAM COMMAND
 # ============================
 def get_latest_command():
-    updates = bot.getUpdates()
-    print("DEBUG RAW UPDATES:", updates)
-    if not updates:
+    global last_update_id
+    print("[TELEGRAM] Checking for new messages...")
+
+    try:
+        updates = bot.getUpdates(
+            offset=last_update_id + 1 if last_update_id else None,
+            timeout=10
+        )
+
+        if not updates:
+            print("[TELEGRAM] No new messages.")
+            return None
+
+        last_update_id = updates[-1]["update_id"]
+
+        message = updates[-1].get("message", {})
+        text = message.get("text", "").lower()
+
+        print(f"[TELEGRAM] Received command: {text}")
+        return text
+
+    except Exception as e:
+        print("[ERROR] Telegram polling failed:", e)
         return None
 
-    last = updates[-1]
-    last_id = last["update_id"]
-
-    bot.getUpdates(offset=last_id + 1)
-
-    if "message" in last and "text" in last["message"]:
-        text = last["message"]["text"].strip().lower()
-        print("Received command:", text)
-        return text
-    return None
 
 # ============================
-# RSI TREND (MACRO PHASE ONLY)
+# MORNING PING
+# ============================
+def morning_ping():
+    print("[PING] Sending morning ping...")
+    msg = "🌞 SOXX Monitoring Started — Market Prep Complete"
+    send_message(msg)
+
+
+# ============================
+# EVENING SUMMARY
+# ============================
+def evening_summary():
+    print("[PING] Sending evening summary...")
+    msg = "🌕 SOXX Monitoring Ended — Market Closed"
+    send_message(msg)
+
+
+# ============================
+# RSI TREND (MACRO PHASE)
 # ============================
 def get_rsi_trend(current_rsi):
-    if hasattr(current_rsi, "iloc"):
-        current_rsi = float(current_rsi.iloc[-1].item())
-
+    print(f"[TREND] Determining RSI trend for {current_rsi}...")
     if current_rsi < 35:
-        phase = "🌊 Dip Phase"
-    elif 35 <= current_rsi < 45:
-        phase = "🌅 Recovery Phase"
-    elif 45 <= current_rsi < 60:
-        phase = "🌤️ Cooling Phase"
+        return "🌊 Dip Phase"
+    elif current_rsi < 45:
+        return "🌅 Recovery Phase"
+    elif current_rsi < 60:
+        return "🌤️ Cooling Phase"
     elif current_rsi >= 70:
-        phase = "🔥 Peak Phase"
-    else:
-        phase = "➖ Neutral Phase"
+        return "🔥 Peak Phase"
+    return "➖ Neutral Phase"
 
-    logging.info("RSI Trend (macro): %s", phase)
-    return phase
 
 # ============================
 # RSI VELOCITY (MICRO MOVEMENT)
 # ============================
 def get_rsi_velocity(current_rsi, previous_rsi):
-    if hasattr(current_rsi, "iloc"):
-        current_rsi = float(current_rsi.iloc[-1].item())
-    if hasattr(previous_rsi, "iloc"):
-        previous_rsi = float(previous_rsi.iloc[-1].item())
-
     diff = current_rsi - previous_rsi
+    print(f"[VELOCITY] RSI diff = {diff}")
 
     if diff <= -2.0:
-        velocity = "🚀 Dropping Fast"
-    elif -2.0 < diff <= -0.5:
-        velocity = "📉 Dropping Slowly"
-    elif -0.5 < diff < 0.5:
-        velocity = "➖ Staying Flat"
-    elif 0.5 <= diff < 2.0:
-        velocity = "🌤️ Rising Slowly"
-    else:
-        velocity = "🔥 Rising Fast"
+        return "🚀 Dropping Fast"
+    elif diff <= -0.5:
+        return "📉 Dropping Slowly"
+    elif diff < 0.5:
+        return "➖ Staying Flat"
+    elif diff < 2.0:
+        return "🌤️ Rising Slowly"
+    return "🔥 Rising Fast"
 
-    logging.info("RSI Velocity: %s (diff=%.2f)", velocity, diff)
-    return velocity
 
 # ============================
 # MAIN 30-MIN STATUS
 # ============================
 def monitor_soxx():
     now = datetime.datetime.now(TZ)
-    logging.info("Starting monitor_soxx() at %s", now)
+    print("[MONITOR] Fetching SOXX data...")
 
     try:
         data = yf.download(SYMBOL, period="5d", interval="30m")
-        logging.info("Downloaded SOXX data: %d rows", len(data))
 
         if data.empty:
+            print("[MONITOR] No data returned from yfinance.")
             send_message("⚠️ No SOXX data available from yfinance.")
-            logging.warning("No data returned from yfinance.")
             return
 
+        print(f"[MONITOR] Raw data columns: {list(data.columns)}")
+        print(f"[MONITOR] Data type: {type(data)} | Shape: {data.shape}")
+
         close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            print("[MONITOR] 'Close' is a DataFrame — extracting first column.")
+            close = close.iloc[:, 0]
+
+        print(f"[MONITOR] Close series type: {type(close)} | Length: {len(close)}")
+
         rsi = compute_rsi(close)
+        if isinstance(rsi, pd.DataFrame):
+            print("[MONITOR] RSI is a DataFrame — extracting first column.")
+            rsi = rsi.iloc[:, 0]
 
-        price_raw = close.iloc[-1]
-        if hasattr(price_raw, "item"):
-            price_raw = price_raw.item()
-        price = round(float(price_raw), 2)
+        print(f"[MONITOR] RSI series type: {type(rsi)} | Length: {len(rsi)}")
 
-        rsi_raw = rsi.iloc[-1]
-        if hasattr(rsi_raw, "item"):
-            rsi_raw = rsi_raw.item()
-        rsi_val = round(float(rsi_raw), 2)
+        rsi_val = round(float(rsi.iloc[-1]), 2)
+        prev_rsi = round(float(rsi.iloc[-2]), 2)
+        price = round(float(close.iloc[-1]), 2)
 
-        rsi_prev_raw = rsi.iloc[-2]
-        if hasattr(rsi_prev_raw, "item"):
-            rsi_prev_raw = rsi_prev_raw.item()
-        prev_rsi = round(float(rsi_prev_raw), 2)
+
+        print(f"[MONITOR] Extracted values -> RSI: {rsi_val}, Prev RSI: {prev_rsi}, Price: {price}")
 
         trend = get_rsi_trend(rsi_val)
         velocity = get_rsi_velocity(rsi_val, prev_rsi)
@@ -171,50 +229,48 @@ def monitor_soxx():
             f"Time: {now.strftime('%Y-%m-%d %H:%M CST')}"
         )
 
+        print("[MONITOR] Sending SOXX update...")
         send_message(msg)
-        logging.info("Message sent successfully: %s", msg)
 
     except Exception as e:
+        print("[ERROR] monitor_soxx failed:", e)
         logging.exception("Error in monitor_soxx(): %s", e)
 
-# ============================
-# WEEKLY SUMMARY
-# ============================
-def weekly_summary(data, rsi):
-    low_price = round(data["Low"].min(), 2)
-    high_price = round(data["High"].max(), 2)
-    closing_price = round(data["Close"].iloc[-1], 2)
-    closing_rsi = round(rsi.iloc[-1], 2)
-    now = datetime.datetime.now(TZ)
-
-    msg = (
-        "📅 Weekly Summary (SOXX)\n"
-        f"Low Price: ${low_price}\n"
-        f"High Price: ${high_price}\n"
-        f"Closing Price: ${closing_price}\n"
-        f"Closing RSI: {closing_rsi}\n"
-        f"Time: {now.strftime('%I:%M %p CST')}"
-    )
-    send_message(msg)
 
 # ============================
 # MAIN ENTRY POINT
 # ============================
 if __name__ == "__main__":
-    now = datetime.datetime.now(TZ)
+    print("[MAIN] Entering main loop...")
 
-    cmd = get_latest_command()
-    print("Command read:", cmd)
+    last_run_minute = None  # initialize before loop
 
-    if cmd and "soxx" in cmd and "status" in cmd:
-        print("Triggering monitor_soxx()...")
-        monitor_soxx()
-    else:
-        print("No command detected.")
+    while True:
+        now = datetime.datetime.now(TZ)
+        print("[LOOP] Alive at:", now.strftime("%H:%M:%S"))
 
-    if now.hour == 8 and now.minute == 30:
-        morning_ping()
-    elif 9 <= now.hour < 15:
-        monitor_soxx()
-    elif now.hour == 15 and now.minute == 0:
-        evening_summary()
+        cmd = get_latest_command()
+        if cmd and "soxx" in cmd and "status" in cmd:
+            print("[LOOP] Triggering monitor_soxx() from Telegram command.")
+            monitor_soxx()
+
+        # Scheduled 30‑minute trigger
+        if 8 <= now.hour < 15 and now.minute % 30 == 0:
+            if last_run_minute != now.minute:
+                print("[LOOP] Scheduled monitor_soxx() triggered.")
+                monitor_soxx()
+                last_run_minute = now.minute
+
+        if now.hour == 8 and now.minute == 0:
+            print("[LOOP] Morning ping triggered.")
+            morning_ping()
+
+        if now.hour == 15 and now.minute == 0:
+            print("[LOOP] Evening summary triggered.")
+            evening_summary()
+
+        print(f"[LOOP] Cycle complete at {now.strftime('%H:%M:%S')} — sleeping for 20 seconds...\n")
+        time.sleep(20)
+
+
+
