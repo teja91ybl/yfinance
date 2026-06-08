@@ -12,15 +12,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-
 # ============================
-# CONFIGURATION (EDIT THESE)
+# CONFIGURATION
 # ============================
 TOKEN = "8809874320:AAHcUO2bjoAJedB8Z4ryGGilQjOn0IXUVs0"
 CHAT_ID = "581156145"
 SYMBOL = "SOXX"
 TZ = pytz.timezone("America/Chicago")
-
 
 bot = telepot.Bot(TOKEN)
 print("Bot username:", bot.getMe()["username"])
@@ -50,46 +48,32 @@ def send_message(msg):
     except Exception as e:
         print("❌ Telegram send error:", e)
 
-
-
 # ============================
 # READ LATEST TELEGRAM COMMAND
 # ============================
 def get_latest_command():
     updates = bot.getUpdates()
-    print("DEBUG RAW UPDATES:", updates)  # <--- ADD THIS
+    print("DEBUG RAW UPDATES:", updates)
     if not updates:
         return None
 
     last = updates[-1]
     last_id = last["update_id"]
 
-    # Acknowledge all updates so Telegram clears them
     bot.getUpdates(offset=last_id + 1)
 
     if "message" in last and "text" in last["message"]:
         text = last["message"]["text"].strip().lower()
-        print("Received command:", text)  # Debug line
+        print("Received command:", text)
         return text
     return None
 
-
 # ============================
-# RSI TREND
+# RSI TREND (MACRO PHASE ONLY)
 # ============================
-def get_rsi_trend(current_rsi, previous_rsi):
+def get_rsi_trend(current_rsi):
     if hasattr(current_rsi, "iloc"):
         current_rsi = float(current_rsi.iloc[-1].item())
-    if hasattr(previous_rsi, "iloc"):
-        previous_rsi = float(previous_rsi.iloc[-1].item())
-
-    diff = current_rsi - previous_rsi
-    if diff > 0.2:
-        trend_icon, trend_label = "📈", "Rising"
-    elif diff < -0.2:
-        trend_icon, trend_label = "📉", "Falling"
-    else:
-        trend_icon, trend_label = "➖", "Flat"
 
     if current_rsi < 35:
         phase = "🌊 Dip Phase"
@@ -100,13 +84,35 @@ def get_rsi_trend(current_rsi, previous_rsi):
     elif current_rsi >= 70:
         phase = "🔥 Peak Phase"
     else:
-        phase = "Neutral Phase"
+        phase = "➖ Neutral Phase"
 
-    result = f"{trend_icon} {trend_label}, {phase}"
-    logging.info("RSI trend result: %s (current=%.2f, previous=%.2f)", result, current_rsi, previous_rsi)
-    return result
+    logging.info("RSI Trend (macro): %s", phase)
+    return phase
 
+# ============================
+# RSI VELOCITY (MICRO MOVEMENT)
+# ============================
+def get_rsi_velocity(current_rsi, previous_rsi):
+    if hasattr(current_rsi, "iloc"):
+        current_rsi = float(current_rsi.iloc[-1].item())
+    if hasattr(previous_rsi, "iloc"):
+        previous_rsi = float(previous_rsi.iloc[-1].item())
 
+    diff = current_rsi - previous_rsi
+
+    if diff <= -2.0:
+        velocity = "🚀 Dropping Fast"
+    elif -2.0 < diff <= -0.5:
+        velocity = "📉 Dropping Slowly"
+    elif -0.5 < diff < 0.5:
+        velocity = "➖ Staying Flat"
+    elif 0.5 <= diff < 2.0:
+        velocity = "🌤️ Rising Slowly"
+    else:
+        velocity = "🔥 Rising Fast"
+
+    logging.info("RSI Velocity: %s (diff=%.2f)", velocity, diff)
+    return velocity
 
 # ============================
 # MAIN 30-MIN STATUS
@@ -116,7 +122,6 @@ def monitor_soxx():
     logging.info("Starting monitor_soxx() at %s", now)
 
     try:
-        # Download data
         data = yf.download(SYMBOL, period="5d", interval="30m")
         logging.info("Downloaded SOXX data: %d rows", len(data))
 
@@ -128,29 +133,24 @@ def monitor_soxx():
         close = data["Close"]
         rsi = compute_rsi(close)
 
-        # --- PRICE (clean float, no dtype leak) ---
         price_raw = close.iloc[-1]
         if hasattr(price_raw, "item"):
             price_raw = price_raw.item()
         price = round(float(price_raw), 2)
 
-        # --- RSI (clean float, rounded) ---
         rsi_raw = rsi.iloc[-1]
         if hasattr(rsi_raw, "item"):
             rsi_raw = rsi_raw.item()
         rsi_val = round(float(rsi_raw), 2)
 
-        # Previous RSI
         rsi_prev_raw = rsi.iloc[-2]
         if hasattr(rsi_prev_raw, "item"):
             rsi_prev_raw = rsi_prev_raw.item()
         prev_rsi = round(float(rsi_prev_raw), 2)
 
-        # Trend + Phase
-        trend = get_rsi_trend(rsi_val, prev_rsi)
-        logging.info("RSI trend computed: %s", trend)
+        trend = get_rsi_trend(rsi_val)
+        velocity = get_rsi_velocity(rsi_val, prev_rsi)
 
-        # --- SOXX STATUS HEADER (unchanged logic) ---
         if rsi_val < 35:
             tag = "🌈 Oversold (Buy Now, Hurry!!)"
         elif rsi_val < 45:
@@ -162,12 +162,12 @@ def monitor_soxx():
 
         header = f"🌤️ SOXX Status — {tag}"
 
-        # --- FINAL MESSAGE ---
         msg = (
-            f"{header}\n"
+            f"{header}\n\n"
             f"RSI Trend: {trend}\n"
-            f"Price: ${price}\n"
+            f"RSI Velocity: {velocity}\n\n"
             f"RSI: {rsi_val}\n"
+            f"Price: ${price}\n"
             f"Time: {now.strftime('%Y-%m-%d %H:%M CST')}"
         )
 
@@ -176,7 +176,6 @@ def monitor_soxx():
 
     except Exception as e:
         logging.exception("Error in monitor_soxx(): %s", e)
-
 
 # ============================
 # WEEKLY SUMMARY
@@ -210,15 +209,12 @@ if __name__ == "__main__":
     if cmd and "soxx" in cmd and "status" in cmd:
         print("Triggering monitor_soxx()...")
         monitor_soxx()
-        #send_message("✅ Command processed successfully.")
     else:
         print("No command detected.")
 
-    # Cron-based automation
     if now.hour == 8 and now.minute == 30:
         morning_ping()
     elif 9 <= now.hour < 15:
         monitor_soxx()
     elif now.hour == 15 and now.minute == 0:
         evening_summary()
-
