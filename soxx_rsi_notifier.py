@@ -9,6 +9,16 @@ import socket
 import os, sys
 import psutil
 
+PID_FILE = "/tmp/soxx_rsi_notifier.pid"
+
+# Prevent multiple instances
+if os.path.exists(PID_FILE):
+    print(f"[INIT] Another instance detected. Exiting.")
+    sys.exit(0)
+
+with open(PID_FILE, "w") as f:
+    f.write(str(os.getpid()))
+
 print("[INIT] Starting SOXX RSI Notifier...")
 
 # ============================
@@ -120,7 +130,7 @@ def get_latest_command():
 # ============================
 def morning_ping():
     print("[PING] Sending morning ping...")
-    msg = "🌞 SOXX Monitoring Started — Market Prep Complete"
+    msg = "📢 SOXX Monitoring Started — Market Prep Complete 📢"
     send_message(msg)
 
 
@@ -129,8 +139,63 @@ def morning_ping():
 # ============================
 def evening_summary():
     print("[PING] Sending evening summary...")
-    msg = "🌕 SOXX Monitoring Ended — Market Closed"
+    msg = "📢 SOXX Monitoring Ended — Market Closed 📢"
     send_message(msg)
+
+
+# ============================
+# WEEKLY INSIGHTS (WITH TIMESTAMPS)
+# ============================
+def weekly_insights():
+    print("[WEEKLY] Generating weekly insights...")
+    try:
+        data = yf.download(SYMBOL, period="7d", interval="5m")
+
+        if data.empty:
+            send_message("📢 Weekly Insights: No data available 📢")
+            return
+
+        # Convert to US/Eastern for market hours
+        data.index = data.index.tz_convert("US/Eastern")
+
+        # Monday–Friday, 8 AM–4 PM EST
+        data = data[
+            (data.index.dayofweek <= 4) &
+            (data.index.hour >= 8) &
+            (data.index.hour <= 16)
+        ]
+
+        if data.empty:
+            send_message("📢 Weekly Insights: No market-hours data 📢")
+            return
+
+        rsi = compute_rsi(data["Close"])
+        data["RSI"] = rsi
+
+        best_buy_ts = data["RSI"].idxmin()
+        best_buy_row = data.loc[best_buy_ts]
+        best_buy_price = round(float(best_buy_row["Close"]), 2)
+        best_buy_rsi = round(float(best_buy_row["RSI"]), 2)
+
+        best_sell_ts = data["RSI"].idxmax()
+        best_sell_row = data.loc[best_sell_ts]
+        best_sell_price = round(float(best_sell_row["Close"]), 2)
+        best_sell_rsi = round(float(best_sell_row["RSI"]), 2)
+
+        def fmt(ts):
+            return ts.strftime("%d%b %I:%M%p")
+
+        msg = (
+            "📢 Weekly Insights (SOXX) 📢\n"
+            f"Best Buy : ${best_buy_price} @ RSI {best_buy_rsi} on {fmt(best_buy_ts)}\n"
+            f"Best Sell: ${best_sell_price} @ RSI {best_sell_rsi} on {fmt(best_sell_ts)}"
+        )
+        send_message(msg)
+
+    except Exception as e:
+        print("[ERROR] weekly_insights failed:", e)
+        logging.exception("Error in weekly_insights(): %s", e)
+        send_message("📢 Weekly Insights failed 📢")
 
 
 # ============================
@@ -138,15 +203,15 @@ def evening_summary():
 # ============================
 def get_rsi_trend(current_rsi):
     print(f"[TREND] Determining RSI trend for {current_rsi}...")
-    if current_rsi < 35:
-        return "🌊 Dip Phase"
+    if current_rsi <= 30:
+        return "🚨🔥 Oversold Dip Phase 🔥🚨"
     elif current_rsi < 45:
-        return "🌅 Recovery Phase"
+        return "💚 Recovery Phase 💚"
     elif current_rsi < 60:
-        return "🌤️ Cooling Phase"
+        return "Cooling Phase"
     elif current_rsi >= 70:
-        return "🔥 Peak Phase"
-    return "➖ Neutral Phase"
+        return "🚨🔥 Peak Phase 🔥🚨"
+    return "Neutral Phase"
 
 
 # ============================
@@ -157,14 +222,14 @@ def get_rsi_velocity(current_rsi, previous_rsi):
     print(f"[VELOCITY] RSI diff = {diff}")
 
     if diff <= -2.0:
-        return "🚀 Dropping Fast"
+        return "📉⬇️ Dropping Fast 📉⬇️"
     elif diff <= -0.5:
-        return "📉 Dropping Slowly"
+        return "📉 Dropping Slowly 📉"
     elif diff < 0.5:
-        return "➖ Staying Flat"
+        return "➖ Staying Flat ➖"
     elif diff < 2.0:
-        return "🌤️ Rising Slowly"
-    return "🔥 Rising Fast"
+        return "📈 Rising Slowly 📈"
+    return "📈⬆️ Rising Fast 📈⬆️"
 
 
 # ============================
@@ -203,12 +268,12 @@ def monitor_soxx():
         prev_rsi = round(float(rsi.iloc[-2]), 2)
         price = round(float(close.iloc[-1]), 2)
 
-
         print(f"[MONITOR] Extracted values -> RSI: {rsi_val}, Prev RSI: {prev_rsi}, Price: {price}")
 
         trend = get_rsi_trend(rsi_val)
         velocity = get_rsi_velocity(rsi_val, prev_rsi)
 
+        # Tag (text) same as before
         if rsi_val < 35:
             tag = "🌈 Oversold (Buy Now, Hurry!!)"
         elif rsi_val < 45:
@@ -218,7 +283,15 @@ def monitor_soxx():
         else:
             tag = "Neutral"
 
-        header = f"🌤️ SOXX Status — {tag}"
+        # Dynamic header icons
+        if rsi_val <= 30 or rsi_val >= 70:
+            header = f"🚨🔥 SOXX Status — {tag} 🔥🚨"
+        elif rsi_val < 45:
+            header = f"💚 SOXX Status — {tag} 💚"
+        elif rsi_val > 60:
+            header = f"💔 SOXX Status — {tag} 💔"
+        else:
+            header = f"🌤️ SOXX Status — {tag}"
 
         msg = (
             f"{header}\n\n"
@@ -235,6 +308,7 @@ def monitor_soxx():
     except Exception as e:
         print("[ERROR] monitor_soxx failed:", e)
         logging.exception("Error in monitor_soxx(): %s", e)
+        send_message("⚠️ monitor_soxx failed")
 
 
 # ============================
@@ -268,9 +342,14 @@ if __name__ == "__main__":
         if now.hour == 15 and now.minute == 0:
             print("[LOOP] Evening summary triggered.")
             evening_summary()
+            # Weekly insights on Friday after close
+            if now.weekday() == 4:
+                print("[LOOP] Weekly insights triggered.")
+                weekly_insights()
 
         print(f"[LOOP] Cycle complete at {now.strftime('%H:%M:%S')} — sleeping for 20 seconds...\n")
         time.sleep(20)
 
-
-
+# Cleanup PID file on exit
+if os.path.exists(PID_FILE):
+    os.remove(PID_FILE)
