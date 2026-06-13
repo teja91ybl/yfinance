@@ -144,44 +144,94 @@ def evening_summary():
 
 
 # ============================
-# WEEKLY INSIGHTS (WITH TIMESTAMPS)
+# WEEKLY INSIGHTS (UPGRADED)
 # ============================
 def weekly_insights():
-    print("[WEEKLY] Generating weekly insights...")
+    print("\n================ WEEKLY INSIGHTS DEBUG ================")
+    print("[WEEKLY] Starting Weekly Insights...")
+
     try:
+        # 1) Download data
         data = yf.download(SYMBOL, period="7d", interval="5m")
+        print("[WEEKLY] Raw data length:", len(data))
+        logging.info(f"[WEEKLY] Raw data length: {len(data)}")
 
-        if data.empty:
-            send_message("📢 Weekly Insights: No data available 📢")
-            return
+        if data is None or len(data) == 0:
+            raise Exception("No data returned from yfinance")
 
-        # Convert to US/Eastern for market hours
-        data.index = data.index.tz_convert("US/Eastern")
+        # 2) Fix MultiIndex columns (happens on some Pi builds)
+        if isinstance(data.columns, pd.MultiIndex):
+            print("[WEEKLY] MultiIndex detected, flattening columns...")
+            logging.info("[WEEKLY] MultiIndex detected, flattening columns...")
+            data.columns = data.columns.get_level_values(0)
 
-        # Monday–Friday, 8 AM–4 PM EST
+        print("[WEEKLY] Columns after flatten:", list(data.columns))
+        logging.info(f"[WEEKLY] Columns after flatten: {list(data.columns)}")
+
+        # 3) Timezone conversion
+        try:
+            data.index = data.index.tz_convert("America/New_York")
+        except Exception as tz_err:
+            print("[WEEKLY] Timezone conversion failed:", tz_err)
+            logging.error(f"[WEEKLY] Timezone conversion failed: {tz_err}")
+            raise Exception("Timezone conversion failed")
+
+        print("[WEEKLY] First timestamp after tz_convert:", data.index[0])
+        logging.info(f"[WEEKLY] First timestamp after tz_convert: {data.index[0]}")
+
+        # 4) Filter market hours
         data = data[
             (data.index.dayofweek <= 4) &
             (data.index.hour >= 8) &
             (data.index.hour <= 16)
         ]
+        print("[WEEKLY] After market-hours filter:", len(data))
+        logging.info(f"[WEEKLY] After market-hours filter: {len(data)}")
+
+        if len(data) < 20:
+            raise Exception("Not enough candles after filtering")
+
+        # 5) Compute RSI using your main function
+        print("[WEEKLY] Computing RSI...")
+        rsi_series = compute_rsi(data["Close"])
+
+        if rsi_series is None:
+            raise Exception("compute_rsi() returned None")
+
+        data["RSI"] = rsi_series
+        print("[WEEKLY] RSI column added. NaN count:", data["RSI"].isna().sum())
+        logging.info(f"[WEEKLY] RSI NaN count: {data['RSI'].isna().sum()}")
+
+        # 6) Drop NaN RSI rows
+        data = data.dropna(subset=["RSI"])
+        print("[WEEKLY] After dropping NaN RSI rows:", len(data))
+        logging.info(f"[WEEKLY] After dropping NaN RSI rows: {len(data)}")
 
         if data.empty:
-            send_message("📢 Weekly Insights: No market-hours data 📢")
-            return
+            raise Exception("No valid RSI data after dropping NaNs")
 
-        rsi = compute_rsi(data["Close"])
-        data["RSI"] = rsi
+        # 7) Safe best buy/sell extraction
+        print("[WEEKLY] Finding best buy/sell points...")
+        logging.info("[WEEKLY] Finding best buy/sell points...")
 
         best_buy_ts = data["RSI"].idxmin()
-        best_buy_row = data.loc[best_buy_ts]
-        best_buy_price = round(float(best_buy_row["Close"]), 2)
-        best_buy_rsi = round(float(best_buy_row["RSI"]), 2)
-
         best_sell_ts = data["RSI"].idxmax()
+
+        best_buy_row = data.loc[best_buy_ts]
         best_sell_row = data.loc[best_sell_ts]
+
+        best_buy_price = round(float(best_buy_row["Close"]), 2)
         best_sell_price = round(float(best_sell_row["Close"]), 2)
+
+        best_buy_rsi = round(float(best_buy_row["RSI"]), 2)
         best_sell_rsi = round(float(best_sell_row["RSI"]), 2)
 
+        print("[WEEKLY] Best Buy:", best_buy_ts, best_buy_price, best_buy_rsi)
+        print("[WEEKLY] Best Sell:", best_sell_ts, best_sell_price, best_sell_rsi)
+        logging.info(f"[WEEKLY] Best Buy: {best_buy_ts} {best_buy_price} {best_buy_rsi}")
+        logging.info(f"[WEEKLY] Best Sell: {best_sell_ts} {best_sell_price} {best_sell_rsi}")
+
+        # 8) Format timestamps
         def fmt(ts):
             return ts.strftime("%d%b %I:%M%p")
 
@@ -190,12 +240,17 @@ def weekly_insights():
             f"Best Buy : ${best_buy_price} @ RSI {best_buy_rsi} on {fmt(best_buy_ts)}\n"
             f"Best Sell: ${best_sell_price} @ RSI {best_sell_rsi} on {fmt(best_sell_ts)}"
         )
+
+        print("[WEEKLY] Sending Weekly Insights...")
         send_message(msg)
 
     except Exception as e:
-        print("[ERROR] weekly_insights failed:", e)
-        logging.exception("Error in weekly_insights(): %s", e)
-        send_message("📢 Weekly Insights failed 📢")
+        error_msg = f"📢 Weekly Insights failed: {str(e)} 📢"
+        print("[ERROR] Weekly Insights:", e)
+        logging.exception("Weekly Insights failed")
+        send_message(error_msg)
+
+    print("================ END WEEKLY INSIGHTS DEBUG ================\n")
 
 
 # ============================
@@ -247,28 +302,17 @@ def monitor_soxx():
             send_message("⚠️ No SOXX data available from yfinance.")
             return
 
-        print(f"[MONITOR] Raw data columns: {list(data.columns)}")
-        print(f"[MONITOR] Data type: {type(data)} | Shape: {data.shape}")
-
         close = data["Close"]
         if isinstance(close, pd.DataFrame):
-            print("[MONITOR] 'Close' is a DataFrame — extracting first column.")
             close = close.iloc[:, 0]
-
-        print(f"[MONITOR] Close series type: {type(close)} | Length: {len(close)}")
 
         rsi = compute_rsi(close)
         if isinstance(rsi, pd.DataFrame):
-            print("[MONITOR] RSI is a DataFrame — extracting first column.")
             rsi = rsi.iloc[:, 0]
-
-        print(f"[MONITOR] RSI series type: {type(rsi)} | Length: {len(rsi)}")
 
         rsi_val = round(float(rsi.iloc[-1]), 2)
         prev_rsi = round(float(rsi.iloc[-2]), 2)
         price = round(float(close.iloc[-1]), 2)
-
-        print(f"[MONITOR] Extracted values -> RSI: {rsi_val}, Prev RSI: {prev_rsi}, Price: {price}")
 
         trend = get_rsi_trend(rsi_val)
         velocity = get_rsi_velocity(rsi_val, prev_rsi)
@@ -324,9 +368,16 @@ if __name__ == "__main__":
         print("[LOOP] Alive at:", now.strftime("%H:%M:%S"))
 
         cmd = get_latest_command()
+
+        # Manual SOXX status
         if cmd and "soxx" in cmd and "status" in cmd:
             print("[LOOP] Triggering monitor_soxx() from Telegram command.")
             monitor_soxx()
+
+        # Manual Weekly Insights
+        if cmd and "soxx" in cmd and "weekly" in cmd:
+            print("[LOOP] Triggering weekly_insights() from Telegram command.")
+            weekly_insights()
 
         # Scheduled 30‑minute trigger
         if 8 <= now.hour < 15 and now.minute % 30 == 0:
