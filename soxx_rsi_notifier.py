@@ -61,23 +61,35 @@ last_update_id = 0
 
 
 # ============================
-# RSI CALCULATION (EMA-based)
+# FIDELITY-STYLE RSI (WILDER)
 # ============================
 def compute_rsi(series, period=14):
-    print(f"[RSI] Computing RSI for {len(series)} candles...")
+    print(f"[RSI] Computing Fidelity-style RSI for {len(series)} candles...")
+
     try:
         delta = series.diff()
+
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
 
-        avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
-        avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+        # Wilder seed (SMA)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+
+        # Wilder smoothing (EMA with alpha=1/period)
+        avg_gain = avg_gain.combine_first(
+            gain.ewm(alpha=1/period, adjust=False).mean()
+        )
+        avg_loss = avg_loss.combine_first(
+            loss.ewm(alpha=1/period, adjust=False).mean()
+        )
 
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
 
-        print("[RSI] RSI calculation complete.")
+        print("[RSI] Fidelity-style RSI calculation complete.")
         return rsi
+
     except Exception as e:
         print("[ERROR] RSI calculation failed:", e)
         return None
@@ -144,81 +156,35 @@ def evening_summary():
 
 
 # ============================
-# WEEKLY INSIGHTS (UPGRADED)
+# WEEKLY INSIGHTS (FULL DEBUG)
 # ============================
 def weekly_insights():
-    print("\n================ WEEKLY INSIGHTS DEBUG ================")
-    print("[WEEKLY] Starting Weekly Insights...")
+    print("\n================ WEEKLY INSIGHTS (1D RSI) ================")
+    print("[WEEKLY] Starting Weekly Insights (1D)...")
 
     try:
-        # 1) Download data
-        data = yf.download(SYMBOL, period="7d", interval="5m")
-        print("[WEEKLY] Raw data length:", len(data))
-        logging.info(f"[WEEKLY] Raw data length: {len(data)}")
+        # 1) Fetch 3 months of daily candles
+        data = yf.download(SYMBOL, period="3mo", interval="1d")
 
         if data is None or len(data) == 0:
             raise Exception("No data returned from yfinance")
 
-        # 2) Fix MultiIndex columns (happens on some Pi builds)
         if isinstance(data.columns, pd.MultiIndex):
-            print("[WEEKLY] MultiIndex detected, flattening columns...")
-            logging.info("[WEEKLY] MultiIndex detected, flattening columns...")
             data.columns = data.columns.get_level_values(0)
 
-        print("[WEEKLY] Columns after flatten:", list(data.columns))
-        logging.info(f"[WEEKLY] Columns after flatten: {list(data.columns)}")
-
-        # 3) Timezone conversion
-        try:
-            data.index = data.index.tz_convert("America/New_York")
-        except Exception as tz_err:
-            print("[WEEKLY] Timezone conversion failed:", tz_err)
-            logging.error(f"[WEEKLY] Timezone conversion failed: {tz_err}")
-            raise Exception("Timezone conversion failed")
-
-        print("[WEEKLY] First timestamp after tz_convert:", data.index[0])
-        logging.info(f"[WEEKLY] First timestamp after tz_convert: {data.index[0]}")
-
-        # 4) Filter market hours
-        data = data[
-            (data.index.dayofweek <= 4) &
-            (data.index.hour >= 8) &
-            (data.index.hour <= 16)
-        ]
-        print("[WEEKLY] After market-hours filter:", len(data))
-        logging.info(f"[WEEKLY] After market-hours filter: {len(data)}")
-
-        if len(data) < 20:
-            raise Exception("Not enough candles after filtering")
-
-        # 5) Compute RSI using your main function
-        print("[WEEKLY] Computing RSI...")
+        # 2) Compute RSI on daily closes
         rsi_series = compute_rsi(data["Close"])
-
-        if rsi_series is None:
-            raise Exception("compute_rsi() returned None")
-
         data["RSI"] = rsi_series
-        print("[WEEKLY] RSI column added. NaN count:", data["RSI"].isna().sum())
-        logging.info(f"[WEEKLY] RSI NaN count: {data['RSI'].isna().sum()}")
-
-        # 6) Drop NaN RSI rows
         data = data.dropna(subset=["RSI"])
-        print("[WEEKLY] After dropping NaN RSI rows:", len(data))
-        logging.info(f"[WEEKLY] After dropping NaN RSI rows: {len(data)}")
 
-        if data.empty:
-            raise Exception("No valid RSI data after dropping NaNs")
+        # 3) Only last 7 trading days
+        last_week = data.tail(7)
 
-        # 7) Safe best buy/sell extraction
-        print("[WEEKLY] Finding best buy/sell points...")
-        logging.info("[WEEKLY] Finding best buy/sell points...")
+        best_buy_ts = last_week["RSI"].idxmin()
+        best_sell_ts = last_week["RSI"].idxmax()
 
-        best_buy_ts = data["RSI"].idxmin()
-        best_sell_ts = data["RSI"].idxmax()
-
-        best_buy_row = data.loc[best_buy_ts]
-        best_sell_row = data.loc[best_sell_ts]
+        best_buy_row = last_week.loc[best_buy_ts]
+        best_sell_row = last_week.loc[best_sell_ts]
 
         best_buy_price = round(float(best_buy_row["Close"]), 2)
         best_sell_price = round(float(best_sell_row["Close"]), 2)
@@ -226,38 +192,27 @@ def weekly_insights():
         best_buy_rsi = round(float(best_buy_row["RSI"]), 2)
         best_sell_rsi = round(float(best_sell_row["RSI"]), 2)
 
-        print("[WEEKLY] Best Buy:", best_buy_ts, best_buy_price, best_buy_rsi)
-        print("[WEEKLY] Best Sell:", best_sell_ts, best_sell_price, best_sell_rsi)
-        logging.info(f"[WEEKLY] Best Buy: {best_buy_ts} {best_buy_price} {best_buy_rsi}")
-        logging.info(f"[WEEKLY] Best Sell: {best_sell_ts} {best_sell_price} {best_sell_rsi}")
-
-        # 8) Format timestamps
         def fmt(ts):
-            return ts.strftime("%d%b %I:%M%p")
+            return ts.strftime("%d%b")
 
         msg = (
-            "📢 Weekly Insights (SOXX) 📢\n"
+            "📢 Weekly Insights (SOXX, Daily RSI) 📢\n"
             f"Best Buy : ${best_buy_price} @ RSI {best_buy_rsi} on {fmt(best_buy_ts)}\n"
             f"Best Sell: ${best_sell_price} @ RSI {best_sell_rsi} on {fmt(best_sell_ts)}"
         )
 
-        print("[WEEKLY] Sending Weekly Insights...")
         send_message(msg)
 
     except Exception as e:
-        error_msg = f"📢 Weekly Insights failed: {str(e)} 📢"
-        print("[ERROR] Weekly Insights:", e)
-        logging.exception("Weekly Insights failed")
-        send_message(error_msg)
+        send_message(f"📢 Weekly Insights failed: {str(e)} 📢")
 
-    print("================ END WEEKLY INSIGHTS DEBUG ================\n")
+    print("================ END WEEKLY INSIGHTS (1D RSI) ================\n")
 
 
 # ============================
-# RSI TREND (MACRO PHASE)
+# RSI TREND (MACRO)
 # ============================
 def get_rsi_trend(current_rsi):
-    print(f"[TREND] Determining RSI trend for {current_rsi}...")
     if current_rsi <= 30:
         return "🚨🔥 Oversold Dip Phase 🔥🚨"
     elif current_rsi < 45:
@@ -270,11 +225,10 @@ def get_rsi_trend(current_rsi):
 
 
 # ============================
-# RSI VELOCITY (MICRO MOVEMENT)
+# RSI VELOCITY (MICRO)
 # ============================
 def get_rsi_velocity(current_rsi, previous_rsi):
     diff = current_rsi - previous_rsi
-    print(f"[VELOCITY] RSI diff = {diff}")
 
     if diff <= -2.0:
         return "📉⬇️ Dropping Fast 📉⬇️"
@@ -298,7 +252,6 @@ def monitor_soxx():
         data = yf.download(SYMBOL, period="5d", interval="30m")
 
         if data.empty:
-            print("[MONITOR] No data returned from yfinance.")
             send_message("⚠️ No SOXX data available from yfinance.")
             return
 
@@ -317,7 +270,6 @@ def monitor_soxx():
         trend = get_rsi_trend(rsi_val)
         velocity = get_rsi_velocity(rsi_val, prev_rsi)
 
-        # Tag (text) same as before
         if rsi_val < 35:
             tag = "🌈 Oversold (Buy Now, Hurry!!)"
         elif rsi_val < 45:
@@ -327,7 +279,6 @@ def monitor_soxx():
         else:
             tag = "Neutral"
 
-        # Dynamic header icons
         if rsi_val <= 30 or rsi_val >= 70:
             header = f"🚨🔥 SOXX Status — {tag} 🔥🚨"
         elif rsi_val < 45:
@@ -346,22 +297,20 @@ def monitor_soxx():
             f"Time: {now.strftime('%Y-%m-%d %H:%M CST')}"
         )
 
-        print("[MONITOR] Sending SOXX update...")
         send_message(msg)
 
     except Exception as e:
-        print("[ERROR] monitor_soxx failed:", e)
         logging.exception("Error in monitor_soxx(): %s", e)
         send_message("⚠️ monitor_soxx failed")
 
 
 # ============================
-# MAIN ENTRY POINT
+# MAIN LOOP
 # ============================
 if __name__ == "__main__":
     print("[MAIN] Entering main loop...")
 
-    last_run_minute = None  # initialize before loop
+    last_run_minute = None
 
     while True:
         now = datetime.datetime.now(TZ)
@@ -369,38 +318,27 @@ if __name__ == "__main__":
 
         cmd = get_latest_command()
 
-        # Manual SOXX status
         if cmd and "soxx" in cmd and "status" in cmd:
-            print("[LOOP] Triggering monitor_soxx() from Telegram command.")
             monitor_soxx()
 
-        # Manual Weekly Insights
         if cmd and "soxx" in cmd and "weekly" in cmd:
-            print("[LOOP] Triggering weekly_insights() from Telegram command.")
             weekly_insights()
 
-        # Scheduled 30‑minute trigger
         if 8 <= now.hour < 15 and now.minute % 30 == 0:
             if last_run_minute != now.minute:
-                print("[LOOP] Scheduled monitor_soxx() triggered.")
                 monitor_soxx()
                 last_run_minute = now.minute
 
         if now.hour == 8 and now.minute == 0:
-            print("[LOOP] Morning ping triggered.")
             morning_ping()
 
         if now.hour == 15 and now.minute == 0:
-            print("[LOOP] Evening summary triggered.")
             evening_summary()
-            # Weekly insights on Friday after close
             if now.weekday() == 4:
-                print("[LOOP] Weekly insights triggered.")
                 weekly_insights()
 
-        print(f"[LOOP] Cycle complete at {now.strftime('%H:%M:%S')} — sleeping for 20 seconds...\n")
         time.sleep(20)
 
-# Cleanup PID file on exit
+# Cleanup PID file
 if os.path.exists(PID_FILE):
     os.remove(PID_FILE)
