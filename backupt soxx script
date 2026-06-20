@@ -19,7 +19,6 @@ if os.path.exists(PID_FILE):
 with open(PID_FILE, "w") as f:
     f.write(str(os.getpid()))
 
-
 print("[INIT] Starting SOXX RSI Notifier...")
 
 # ============================
@@ -62,23 +61,35 @@ last_update_id = 0
 
 
 # ============================
-# RSI CALCULATION (EMA-based)
+# FIDELITY-STYLE RSI (WILDER)
 # ============================
 def compute_rsi(series, period=14):
-    print(f"[RSI] Computing RSI for {len(series)} candles...")
+    print(f"[RSI] Computing Fidelity-style RSI for {len(series)} candles...")
+
     try:
         delta = series.diff()
+
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
 
-        avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
-        avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+        # Wilder seed (SMA)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+
+        # Wilder smoothing (EMA with alpha=1/period)
+        avg_gain = avg_gain.combine_first(
+            gain.ewm(alpha=1/period, adjust=False).mean()
+        )
+        avg_loss = avg_loss.combine_first(
+            loss.ewm(alpha=1/period, adjust=False).mean()
+        )
 
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
 
-        print("[RSI] RSI calculation complete.")
+        print("[RSI] Fidelity-style RSI calculation complete.")
         return rsi
+
     except Exception as e:
         print("[ERROR] RSI calculation failed:", e)
         return None
@@ -131,7 +142,7 @@ def get_latest_command():
 # ============================
 def morning_ping():
     print("[PING] Sending morning ping...")
-    msg = "🌞 SOXX Monitoring Started — Market Prep Complete"
+    msg = "📢 SOXX Monitoring Started — Market Prep Complete 📢"
     send_message(msg)
 
 
@@ -140,42 +151,94 @@ def morning_ping():
 # ============================
 def evening_summary():
     print("[PING] Sending evening summary...")
-    msg = "🌕 SOXX Monitoring Ended — Market Closed"
+    msg = "📢 SOXX Monitoring Ended — Market Closed 📢"
     send_message(msg)
 
 
 # ============================
-# RSI TREND (MACRO PHASE)
+# WEEKLY INSIGHTS (FULL DEBUG)
+# ============================
+def weekly_insights():
+    print("\n================ WEEKLY INSIGHTS (1D RSI) ================")
+    print("[WEEKLY] Starting Weekly Insights (1D)...")
+
+    try:
+        # 1) Fetch 3 months of daily candles
+        data = yf.download(SYMBOL, period="3mo", interval="1d")
+
+        if data is None or len(data) == 0:
+            raise Exception("No data returned from yfinance")
+
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        # 2) Compute RSI on daily closes
+        rsi_series = compute_rsi(data["Close"])
+        data["RSI"] = rsi_series
+        data = data.dropna(subset=["RSI"])
+
+        # 3) Only last 7 trading days
+        last_week = data.tail(7)
+
+        best_buy_ts = last_week["RSI"].idxmin()
+        best_sell_ts = last_week["RSI"].idxmax()
+
+        best_buy_row = last_week.loc[best_buy_ts]
+        best_sell_row = last_week.loc[best_sell_ts]
+
+        best_buy_price = round(float(best_buy_row["Close"]), 2)
+        best_sell_price = round(float(best_sell_row["Close"]), 2)
+
+        best_buy_rsi = round(float(best_buy_row["RSI"]), 2)
+        best_sell_rsi = round(float(best_sell_row["RSI"]), 2)
+
+        def fmt(ts):
+            return ts.strftime("%d%b")
+
+        msg = (
+            "📢 Weekly Insights (SOXX, Daily RSI) 📢\n"
+            f"Best Buy : ${best_buy_price} @ RSI {best_buy_rsi} on {fmt(best_buy_ts)}\n"
+            f"Best Sell: ${best_sell_price} @ RSI {best_sell_rsi} on {fmt(best_sell_ts)}"
+        )
+
+        send_message(msg)
+
+    except Exception as e:
+        send_message(f"📢 Weekly Insights failed: {str(e)} 📢")
+
+    print("================ END WEEKLY INSIGHTS (1D RSI) ================\n")
+
+
+# ============================
+# RSI TREND (MACRO)
 # ============================
 def get_rsi_trend(current_rsi):
-    print(f"[TREND] Determining RSI trend for {current_rsi}...")
-    if current_rsi < 35:
-        return "🌊 Dip Phase"
+    if current_rsi <= 30:
+        return "🚨🔥 Oversold Dip Phase 🔥🚨"
     elif current_rsi < 45:
-        return "🌅 Recovery Phase"
+        return "💚 Recovery Phase 💚"
     elif current_rsi < 60:
-        return "🌤️ Cooling Phase"
+        return "Cooling Phase"
     elif current_rsi >= 70:
-        return "🔥 Peak Phase"
-    return "➖ Neutral Phase"
+        return "🚨🔥 Peak Phase 🔥🚨"
+    return "Neutral Phase"
 
 
 # ============================
-# RSI VELOCITY (MICRO MOVEMENT)
+# RSI VELOCITY (MICRO)
 # ============================
 def get_rsi_velocity(current_rsi, previous_rsi):
     diff = current_rsi - previous_rsi
-    print(f"[VELOCITY] RSI diff = {diff}")
 
     if diff <= -2.0:
-        return "🚀 Dropping Fast"
+        return "📉⬇️ Dropping Fast 📉⬇️"
     elif diff <= -0.5:
-        return "📉 Dropping Slowly"
+        return "📉 Dropping Slowly 📉"
     elif diff < 0.5:
-        return "➖ Staying Flat"
+        return "➖ Staying Flat ➖"
     elif diff < 2.0:
-        return "🌤️ Rising Slowly"
-    return "🔥 Rising Fast"
+        return "📈 Rising Slowly 📈"
+    return "📈⬆️ Rising Fast 📈⬆️"
 
 
 # ============================
@@ -189,33 +252,20 @@ def monitor_soxx():
         data = yf.download(SYMBOL, period="5d", interval="30m")
 
         if data.empty:
-            print("[MONITOR] No data returned from yfinance.")
             send_message("⚠️ No SOXX data available from yfinance.")
             return
 
-        print(f"[MONITOR] Raw data columns: {list(data.columns)}")
-        print(f"[MONITOR] Data type: {type(data)} | Shape: {data.shape}")
-
         close = data["Close"]
         if isinstance(close, pd.DataFrame):
-            print("[MONITOR] 'Close' is a DataFrame — extracting first column.")
             close = close.iloc[:, 0]
-
-        print(f"[MONITOR] Close series type: {type(close)} | Length: {len(close)}")
 
         rsi = compute_rsi(close)
         if isinstance(rsi, pd.DataFrame):
-            print("[MONITOR] RSI is a DataFrame — extracting first column.")
             rsi = rsi.iloc[:, 0]
-
-        print(f"[MONITOR] RSI series type: {type(rsi)} | Length: {len(rsi)}")
 
         rsi_val = round(float(rsi.iloc[-1]), 2)
         prev_rsi = round(float(rsi.iloc[-2]), 2)
         price = round(float(close.iloc[-1]), 2)
-
-
-        print(f"[MONITOR] Extracted values -> RSI: {rsi_val}, Prev RSI: {prev_rsi}, Price: {price}")
 
         trend = get_rsi_trend(rsi_val)
         velocity = get_rsi_velocity(rsi_val, prev_rsi)
@@ -229,7 +279,14 @@ def monitor_soxx():
         else:
             tag = "Neutral"
 
-        header = f"🌤️ SOXX Status — {tag}"
+        if rsi_val <= 30 or rsi_val >= 70:
+            header = f"🚨🔥 SOXX Status — {tag} 🔥🚨"
+        elif rsi_val < 45:
+            header = f"💚 SOXX Status — {tag} 💚"
+        elif rsi_val > 60:
+            header = f"💔 SOXX Status — {tag} 💔"
+        else:
+            header = f"🌤️ SOXX Status — {tag}"
 
         msg = (
             f"{header}\n\n"
@@ -240,51 +297,48 @@ def monitor_soxx():
             f"Time: {now.strftime('%Y-%m-%d %H:%M CST')}"
         )
 
-        print("[MONITOR] Sending SOXX update...")
         send_message(msg)
 
     except Exception as e:
-        print("[ERROR] monitor_soxx failed:", e)
         logging.exception("Error in monitor_soxx(): %s", e)
+        send_message("⚠️ monitor_soxx failed")
 
 
 # ============================
-# MAIN ENTRY POINT
+# MAIN LOOP
 # ============================
 if __name__ == "__main__":
     print("[MAIN] Entering main loop...")
 
-    last_run_minute = None  # initialize before loop
+    last_run_minute = None
 
     while True:
         now = datetime.datetime.now(TZ)
         print("[LOOP] Alive at:", now.strftime("%H:%M:%S"))
 
         cmd = get_latest_command()
+
         if cmd and "soxx" in cmd and "status" in cmd:
-            print("[LOOP] Triggering monitor_soxx() from Telegram command.")
             monitor_soxx()
 
-        # Scheduled 30‑minute trigger
+        if cmd and "soxx" in cmd and "weekly" in cmd:
+            weekly_insights()
+
         if 8 <= now.hour < 15 and now.minute % 30 == 0:
             if last_run_minute != now.minute:
-                print("[LOOP] Scheduled monitor_soxx() triggered.")
                 monitor_soxx()
                 last_run_minute = now.minute
 
         if now.hour == 8 and now.minute == 0:
-            print("[LOOP] Morning ping triggered.")
             morning_ping()
 
         if now.hour == 15 and now.minute == 0:
-            print("[LOOP] Evening summary triggered.")
             evening_summary()
+            if now.weekday() == 4:
+                weekly_insights()
 
-        print(f"[LOOP] Cycle complete at {now.strftime('%H:%M:%S')} — sleeping for 20 seconds...\n")
         time.sleep(20)
-# Cleanup PID file on exit
+
+# Cleanup PID file
 if os.path.exists(PID_FILE):
     os.remove(PID_FILE)
-
-
-
