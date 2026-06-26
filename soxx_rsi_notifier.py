@@ -415,7 +415,7 @@ if __name__ == "__main__":
                 elif "soxx" in cmd and "monthly" in cmd:
                     send_monthly_insights()
 
-            if CONFIG["market_open_hour"] <= now.hour < CONFIG["market_close_hour"]:
+            if CONFIG["market_open_hour"] <= now.hour <= CONFIG["market_close_hour"]:
                 if now.minute % CONFIG["monitor_interval_minutes"] == 0:
                     if last_run_minute != now.minute:
                         monitor_soxx()
